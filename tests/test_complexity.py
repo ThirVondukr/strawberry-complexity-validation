@@ -27,10 +27,6 @@ class Query:
     def multiplier_ok(self) -> Multiplied:
         return Multiplied()
 
-    @strawberry.field(extensions=[Cost(complexity=3)])
-    def test(self) -> None:
-        pass
-
 
 schema = Schema(
     query=Query,

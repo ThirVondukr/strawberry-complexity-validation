@@ -1,0 +1,17 @@
+directive @cost(complexity: Int, multiplier: Int) on FIELD_DEFINITION | ARGUMENT_DEFINITION
+
+type Multiplied {
+  a: Void
+  b: Void
+  c: Void
+}
+
+type Query {
+  veryComplex: Void @cost(complexity: 201, multiplier: 1)
+  multiplierErr: Multiplied! @cost(complexity: 0, multiplier: 34)
+  multiplierOk: Multiplied! @cost(complexity: 0, multiplier: 33)
+  testArguments(argument: Int! @cost(multiplier: 3)): Void
+}
+
+"""Represents NULL values"""
+scalar Void

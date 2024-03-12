@@ -24,9 +24,12 @@ from strawberry.schema_directive import Location
 from strawberry.types import Info
 
 
-@strawberry.schema_directive(name="cost", locations=[Location.FIELD_DEFINITION])
+@strawberry.schema_directive(
+    name="cost",
+    locations=[Location.FIELD_DEFINITION, Location.ARGUMENT_DEFINITION],
+)
 class CostDirective:
-    complexity: int | None = None
+    complexity: int | None = strawberry.UNSET
     multiplier: int | None = strawberry.UNSET
 
 
@@ -92,7 +95,7 @@ class FragmentLateEval:
 @dataclasses.dataclass(kw_only=True, slots=True)
 class State:
     cost: CostDirective | None = None
-    multiplier: int = 1
+    multipliers: list[int] = dataclasses.field(default_factory=lambda: [1])
     complexity: int
     children: list["State | FragmentLateEval"] = dataclasses.field(
         default_factory=list,
@@ -109,18 +112,21 @@ class State:
                 cost=cost,
                 complexity=default_complexity,
             )
+
+        multiplier = (
+            cost.multiplier
+            if cost.multiplier not in (None, strawberry.UNSET)
+            else 1
+        )
+        complexity = (
+            cost.complexity
+            if cost.complexity not in (None, strawberry.UNSET)
+            else default_complexity
+        )
         return cls(
             cost=cost,
-            multiplier=(
-                cost.multiplier  # type: ignore[arg-type]
-                if cost.multiplier not in (None, strawberry.UNSET)
-                else 1
-            ),
-            complexity=(
-                cost.complexity  # type: ignore[arg-type]
-                if cost.complexity not in (None, strawberry.UNSET)
-                else default_complexity
-            ),
+            multipliers=[multiplier],  # type: ignore[list-item]
+            complexity=complexity,  # type: ignore[arg-type]
         )
 
 
@@ -146,7 +152,10 @@ class QueryComplexityValidationRule(ValidationRule):
             state = self._fragments[state.name]
 
         children_cost = sum(self._resolve_complexity(c) for c in state.children)
-        return state.multiplier * children_cost + state.complexity
+        return (
+            sum(multiplier * children_cost for multiplier in state.multipliers)
+            + state.complexity
+        )
 
     def enter_document(self, node: DocumentNode, *args: object) -> None:
         if self.extension is None:

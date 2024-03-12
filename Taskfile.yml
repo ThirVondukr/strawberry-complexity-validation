@@ -46,6 +46,15 @@ tasks:
       - "{{.RUNNER}} coverage report -m"
       - "{{.RUNNER}} coverage xml"
 
+  gql:
+    desc: Export GraphQL Schema
+    cmds:
+      - >
+        {{.RUNNER}} strawberry export-schema
+        --output schema.graphql
+        tests.test_complexity
+#        --app-dir src
+
   all:
     desc: Run the standard set of checks performed in CI
     cmds:
