@@ -1,16 +1,27 @@
-directive @cost(complexity: Int, multiplier: Int) on FIELD_DEFINITION | ARGUMENT_DEFINITION
+directive @cost(complexity: Int) on FIELD_DEFINITION | OBJECT
 
-type Multiplied {
-  a: Void
-  b: Void
-  c: Void
+directive @listCost(assumedSize: Int, arguments: [String!], sizedFields: [String!]) on FIELD_DEFINITION
+
+type Author @cost(complexity: 1) {
+  id: ID!
+  name: String! @cost(complexity: 1)
+}
+
+type Book implements Press @cost(complexity: 1) {
+  title: String! @cost(complexity: 1)
+  id: ID!
+  authors: [Author!]! @listCost(assumedSize: 2)
+}
+
+interface Press {
+  title: String!
 }
 
 type Query {
-  veryComplex: Void @cost(complexity: 201, multiplier: 1)
-  multiplierErr: Multiplied! @cost(complexity: 0, multiplier: 34)
-  multiplierOk: Multiplied! @cost(complexity: 0, multiplier: 33)
-  testArguments(argument: Int! @cost(multiplier: 3)): Void
+  exceedsMaxComplexity: Void @cost(complexity: 201)
+  ok: Void @cost(complexity: 200)
+  books(limit: Int = null): [Book!]! @listCost(assumedSize: 10, arguments: ["limit"])
+  press(limit: Int = null): [Press!]! @listCost(assumedSize: 10, arguments: ["limit"])
 }
 
 """Represents NULL values"""

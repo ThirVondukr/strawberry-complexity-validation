@@ -1,6 +1,9 @@
+import contextvars
 import dataclasses
-from collections.abc import Iterator, MutableMapping
-from typing import Self
+import typing
+from collections.abc import Callable, Iterator, MutableMapping
+from contextvars import ContextVar
+from typing import Any, TypeVar
 
 import strawberry
 from graphql import (
@@ -9,72 +12,42 @@ from graphql import (
     FragmentDefinitionNode,
     FragmentSpreadNode,
     GraphQLError,
-    GraphQLField,
+    GraphQLInterfaceType,
+    GraphQLNamedType,
     GraphQLSchema,
+    GraphQLType,
     GraphQLUnionType,
+    GraphQLWrappingType,
     ValidationContext,
     ValidationRule,
     VisitorAction,
 )
-from strawberry.extensions import FieldExtension, SchemaExtension
-from strawberry.extensions.field_extension import SyncExtensionResolver
-from strawberry.field import StrawberryField
+from strawberry.extensions import SchemaExtension
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.schema_directive import Location
-from strawberry.types import Info
+
+T = TypeVar("T")
 
 
 @strawberry.schema_directive(
     name="cost",
-    locations=[Location.FIELD_DEFINITION, Location.ARGUMENT_DEFINITION],
+    locations=[Location.FIELD_DEFINITION, Location.OBJECT],
 )
-class CostDirective:
+class Cost:
     complexity: int | None = strawberry.UNSET
-    multiplier: int | None = strawberry.UNSET
 
 
-class Cost(FieldExtension):
-    def __init__(
-        self,
-        complexity: int | None = None,
-        multiplier: int = 1,
-    ) -> None:
-        self.complexity = complexity
-        self.multiplier = multiplier
-
-    def apply(self, field: StrawberryField) -> None:
-        directive = CostDirective(
-            complexity=self.complexity,
-            multiplier=self.multiplier,
-        )
-        field.directives.append(directive)
-
-    async def resolve_async(
-        self,
-        next_: SyncExtensionResolver,
-        source: object,
-        info: Info[object, object],
-        **kwargs: object,
-    ) -> object:
-        return await next_(source, info, **kwargs)
-
-    def resolve(
-        self,
-        next_: SyncExtensionResolver,
-        source: object,
-        info: Info[object, object],
-        **kwargs: object,
-    ) -> object:
-        return next_(source, info, **kwargs)
+@strawberry.schema_directive(
+    name="listCost",
+    locations=[Location.FIELD_DEFINITION],
+)
+class ListCost:
+    assumed_size: int | None = strawberry.UNSET
+    arguments: list[str] | None = strawberry.UNSET
+    sized_fields: list[str] | None = strawberry.UNSET
 
 
-def _find_cost_directive(node: GraphQLField) -> CostDirective | None:
-    for extension in node.extensions.values():
-        for directive in extension.directives:
-            if isinstance(directive, CostDirective):
-                return directive
-    return None
-
+AnyCostDirective = Cost | ListCost
 
 _STRAWBERRY_KEY = GraphQLCoreConverter.DEFINITION_BACKREF
 
@@ -87,6 +60,12 @@ def _find_extension(schema: GraphQLSchema) -> "QueryComplexityExtension | None":
     return None
 
 
+def _get_unset_value(value: T | None, default: T) -> T:
+    if value is None or value is strawberry.UNSET:
+        return default
+    return value
+
+
 @dataclasses.dataclass(kw_only=True, slots=True)
 class FragmentLateEval:
     name: str
@@ -94,46 +73,45 @@ class FragmentLateEval:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class State:
-    cost: CostDirective | None = None
-    multipliers: list[int] = dataclasses.field(default_factory=lambda: [1])
-    complexity: int
+    directive: AnyCostDirective | None = None
+    added_complexity: int = 0
     children: list["State | FragmentLateEval"] = dataclasses.field(
         default_factory=list,
     )
 
-    @classmethod
-    def from_cost(
-        cls,
-        cost: CostDirective | None,
-        default_complexity: int,
-    ) -> Self:
-        if cost is None:
-            return cls(
-                cost=cost,
-                complexity=default_complexity,
-            )
 
-        multiplier = (
-            cost.multiplier
-            if cost.multiplier not in (None, strawberry.UNSET)
-            else 1
-        )
-        complexity = (
-            cost.complexity
-            if cost.complexity not in (None, strawberry.UNSET)
-            else default_complexity
-        )
-        return cls(
-            cost=cost,
-            multipliers=[multiplier],  # type: ignore[list-item]
-            complexity=complexity,  # type: ignore[arg-type]
-        )
+GT = TypeVar("GT", bound=GraphQLType)
+
+
+def _unwrap_graphql_node(
+    node: GT | GraphQLWrappingType[GT] | None,
+) -> GT | None:
+    while isinstance(node, GraphQLWrappingType):
+        node = node.of_type
+    return node
+
+
+def default_cost_compare_key(directive: AnyCostDirective | None) -> int:
+    if directive is None:
+        return -1
+
+    if isinstance(directive, ListCost):
+        return _get_unset_value(directive.assumed_size, 0)
+
+    return _get_unset_value(directive.complexity, 0)
+
+
+@dataclasses.dataclass(slots=True, kw_only=True)
+class ComplexityResult:
+    current: int
+    max: int
 
 
 class QueryComplexityValidationRule(ValidationRule):
     def __init__(self, context: ValidationContext) -> None:
         super().__init__(context)
-        self.extension: QueryComplexityExtension = _find_extension(  # type: ignore[assignment]
+        self.extension: QueryComplexityExtension = _find_extension(
+            # type: ignore[assignment]
             context.schema,
         )
         self._state: list[State] = []
@@ -147,64 +125,136 @@ class QueryComplexityValidationRule(ValidationRule):
     def _leave(self) -> State:
         return self._state.pop()
 
+    def _calculate_complexity(
+        self,
+        state: State,
+        children_complexity: int,
+    ) -> int:
+        if isinstance(state.directive, ListCost):
+            return (
+                state.added_complexity + children_complexity
+            ) * _get_unset_value(state.directive.assumed_size, 0)
+
+        if isinstance(state.directive, Cost):
+            return (
+                _get_unset_value(
+                    state.directive.complexity,
+                    default=self.extension.default_complexity,
+                )
+                + children_complexity
+            )
+
+        return self.extension.default_complexity + children_complexity
+
     def _resolve_complexity(self, state: State | FragmentLateEval) -> int:
         if isinstance(state, FragmentLateEval):
             state = self._fragments[state.name]
 
-        children_cost = sum(self._resolve_complexity(c) for c in state.children)
-        return (
-            sum(multiplier * children_cost for multiplier in state.multipliers)
-            + state.complexity
+        children_complexity = sum(
+            self._resolve_complexity(c) for c in state.children
         )
+
+        return self._calculate_complexity(
+            state=state,
+            children_complexity=children_complexity,
+        )
+
+    def _find_cost_directive(
+        self,
+        node: GraphQLWrappingType[GraphQLNamedType] | GraphQLNamedType | None,
+    ) -> AnyCostDirective | None:
+        node = _unwrap_graphql_node(node)
+        if not node:
+            return None
+
+        if isinstance(node, GraphQLInterfaceType):
+            return max(
+                (
+                    self._find_cost_directive(obj)
+                    for obj in self.context.schema.get_implementations(
+                        node,
+                    ).objects
+                ),
+                key=default_cost_compare_key,
+            )
+
+        for extension in node.extensions.values():
+            for directive in extension.directives:
+                if isinstance(directive, typing.get_args(AnyCostDirective)):
+                    return directive  # type: ignore[no-any-return]
+        return None
 
     def enter_document(self, node: DocumentNode, *args: object) -> None:
         if self.extension is None:
             # Issue a warning?
             return self.BREAK  # type: ignore[unreachable]
-        self._enter(State(cost=None, complexity=0), contributes_to_cost=False)
+        self._enter(State(), contributes_to_cost=False)
         return None
 
     def leave_document(self, node: DocumentNode, *args: object) -> None:
         state = self._leave()
         assert not self._state  # noqa: S101
         complexity = self._resolve_complexity(state)
+        _complexity_var.set(
+            ComplexityResult(
+                current=complexity,
+                max=self.extension.max_complexity,
+            ),
+        )
+
         if complexity > self.extension.max_complexity:
             self.report_error(
                 GraphQLError(
                     f"Complexity of {complexity} is greater than max complexity of {self.extension.max_complexity}",
                     extensions={
-                        "QUERY_COMPLEXITY": {
-                            "CURRENT": complexity,
-                            "MAX": self.extension.max_complexity,
+                        "complexity": {
+                            "current": complexity,
+                            "max": self.extension.max_complexity,
                         },
                     },
                 ),
             )
 
-    def enter_field(
+    def enter_field(  # noqa: C901
         self,
         node: FieldNode,
         *args: object,
     ) -> VisitorAction:
-        type_ = self.context.get_parent_type()
-        # Probably an invalid query
-        if type_ is None:
+        field_name = node.name.value
+        if field_name.startswith("__"):
             return self.SKIP
 
-        cost = None
-        if (
-            not isinstance(type_, GraphQLUnionType)
-            and node.name.value in type_.fields
-        ):
-            node_definition = type_.fields[node.name.value]
-            cost = _find_cost_directive(node_definition)
+        # Probably an invalid query
+        if (parent_type := self.context.get_parent_type()) is None:
+            return self.SKIP
 
-        self._enter(
-            State.from_cost(
-                cost=cost,
-                default_complexity=self.extension.default_complexity,
-            ),
-        )
+        if isinstance(parent_type, GraphQLUnionType):
+            return None
+
+        if field_name not in parent_type.fields:
+            return None
+
+        if isinstance(parent_type, GraphQLInterfaceType):
+            definitions = [
+                obj.fields[field_name]
+                for obj in self.context.schema.get_implementations(
+                    parent_type,
+                ).objects
+            ]
+        else:
+            definitions = [parent_type.fields[field_name]]
+
+        directives = [self._find_cost_directive(def_) for def_ in definitions]
+        resolves_to_cost = self._find_cost_directive(self.context.get_type())
+        cost = max(directives, key=default_cost_compare_key)
+
+        state = State(directive=cost)
+        if resolves_to_cost and not isinstance(resolves_to_cost, ListCost):
+            state.added_complexity += _get_unset_value(
+                resolves_to_cost.complexity,
+                0,
+            )
+        self._enter(state)
         return None
 
     def leave_field(self, node: FieldNode, *args: object) -> None:
@@ -215,7 +265,7 @@ class QueryComplexityValidationRule(ValidationRule):
         node: FragmentDefinitionNode,
         *_args: object,
     ) -> None:
-        state = State(complexity=0)
+        state = State()
         self._fragments[node.name.value] = state
         self._enter(state, contributes_to_cost=False)
 
@@ -240,10 +290,29 @@ class QueryComplexityValidationRule(ValidationRule):
         )
 
 
+_complexity_var: ContextVar[ComplexityResult] = contextvars.ContextVar(
+    "__strawberry__complexity",
+)
+
+
+@dataclasses.dataclass(kw_only=True)
+class QueryComplexityConfig:
+    cost_compare_key: Callable[[AnyCostDirective | None], int] = (
+        default_cost_compare_key
+    )
+
+
 class QueryComplexityExtension(SchemaExtension):
-    def __init__(self, max_complexity: int, default_cost: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        max_complexity: int,
+        default_cost: int = 0,
+        report_complexity: bool = False,
+    ) -> None:
         self.max_complexity = max_complexity
         self.default_complexity = default_cost
+        self.report_complexity = report_complexity
 
     def on_operation(self) -> Iterator[None]:
         self.execution_context.validation_rules = (
@@ -251,3 +320,19 @@ class QueryComplexityExtension(SchemaExtension):
             QueryComplexityValidationRule,
         )
         yield
+
+    def get_results(self) -> dict[str, Any]:
+        if not self.report_complexity:
+            return {}
+
+        try:
+            result = _complexity_var.get()
+        except LookupError:
+            return {}
+
+        return {
+            "complexity": {
+                "current": result.current,
+                "max": result.max,
+            },
+        }

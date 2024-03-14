@@ -1,104 +1,89 @@
-import pytest
+from collections.abc import Sequence
+
 import strawberry
 from strawberry import Schema
-from strawberry_query_complexity import Cost, QueryComplexityExtension
+from strawberry_query_complexity import Cost, ListCost, QueryComplexityExtension
 
-MAX_COMPLEXITY = 100
+MAX_COMPLEXITY = 200
+BOOKS_ASSUMED_SIZE = 10
 
 
-@strawberry.type
-class Multiplied:
-    a: None = None
-    b: None = None
-    c: None = None
+@strawberry.type(directives=[Cost(complexity=1)])
+class Author:
+    id: strawberry.ID
+    name: str = strawberry.field(directives=[Cost(complexity=1)])
+
+
+@strawberry.interface
+class Press:
+    title: str
+
+
+@strawberry.type(directives=[Cost(complexity=1)])
+class Book(Press):
+    id: strawberry.ID
+    title: str = strawberry.field(directives=[Cost(complexity=1)])
+    authors: Sequence[Author] = strawberry.field(
+        directives=[ListCost(assumed_size=2)],
+    )
+
+
+@strawberry.type(directives=[Cost(complexity=1)])
+class Magazine(Press):
+    id: strawberry.ID
+    title: str = strawberry.field(directives=[Cost(complexity=2)])
 
 
 @strawberry.type
 class Query:
-    @strawberry.field(extensions=[Cost(complexity=MAX_COMPLEXITY + 1)])  # type: ignore[misc]
-    def very_complex(self) -> None:
+    @strawberry.field(
+        directives=[Cost(complexity=MAX_COMPLEXITY + 1)],
+    )  # type: ignore[misc]
+    def exceeds_max_complexity(self) -> None:
         return None
 
-    @strawberry.field(extensions=[Cost(multiplier=34, complexity=0)])  # type: ignore[misc]
-    def multiplier_err(self) -> Multiplied:
-        return Multiplied()
+    @strawberry.field(directives=[Cost(complexity=MAX_COMPLEXITY)])  # type: ignore[misc]
+    def ok(self) -> None:
+        return None
 
-    @strawberry.field(extensions=[Cost(multiplier=33, complexity=0)])  # type: ignore[misc]
-    def multiplier_ok(self) -> Multiplied:
-        return Multiplied()
+    @strawberry.field(directives=[ListCost(assumed_size=BOOKS_ASSUMED_SIZE, arguments=["limit"])])  # type: ignore[misc]
+    def books(
+        self,
+        limit: int | None = None,  # noqa: ARG002
+    ) -> Sequence[Book]:
+        return []
+
+    @strawberry.field(directives=[ListCost(assumed_size=BOOKS_ASSUMED_SIZE, arguments=["limit"])])  # type: ignore[misc]
+    def press(
+        self,
+        limit: int | None = None,  # noqa: ARG002
+    ) -> Sequence[Press]:
+        return []
 
 
 schema = Schema(
     query=Query,
     extensions=[
-        QueryComplexityExtension(max_complexity=MAX_COMPLEXITY, default_cost=1),
+        QueryComplexityExtension(
+            max_complexity=MAX_COMPLEXITY,
+            report_complexity=True,
+        ),
     ],
+    types=[Magazine],
 )
 
 
-def test_field_too_complex() -> None:
+def test_field_exceeds_max_complexity() -> None:
     query = """
     query {
-        veryComplex
+        exceedsMaxComplexity
     }
     """
     result = schema.execute_sync(query=query)
     assert result.errors
     assert result.errors[0].extensions == {
-        "QUERY_COMPLEXITY": {
-            "MAX": MAX_COMPLEXITY,
-            "CURRENT": MAX_COMPLEXITY + 1,
+        "complexity": {
+            "max": MAX_COMPLEXITY,
+            "current": MAX_COMPLEXITY + 1,
         },
     }
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        """
-        fragment F on Multiplied {
-            a
-            b
-            c
-        }
-        query {
-            multiplierErr {
-                ... F
-            }
-        }
-        """,
-        """
-       query {
-           multiplierErr {
-               a
-               b
-               c
-           }
-       }
-       """,
-    ],
-)
-def test_multiplier(query: str) -> None:
-
-    result = schema.execute_sync(query=query)
-    assert result.errors
-    assert result.errors[0].extensions == {
-        "QUERY_COMPLEXITY": {
-            "MAX": MAX_COMPLEXITY,
-            "CURRENT": 34 * 3,
-        },
-    }
-
-
-def test_multiplier_ok() -> None:
-    query = """
-    query {
-        multiplierOk {
-            a
-            b
-            c
-        }
-    }
-    """
-    result = schema.execute_sync(query=query)
-    assert not result.errors
