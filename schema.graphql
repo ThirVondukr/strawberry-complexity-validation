@@ -13,6 +13,11 @@ type Book implements Press @cost(complexity: 1) {
   authors: [Author!]! @listCost(assumedSize: 2)
 }
 
+type Magazine implements Press @cost(complexity: 1) {
+  title: String! @cost(complexity: 2)
+  id: ID!
+}
+
 interface Press {
   title: String!
 }

@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from strawberry import Schema
 from strawberry_query_complexity import QueryComplexityExtension
@@ -120,5 +122,65 @@ def test_list_cost(query: str, cost: int) -> None:
     assert result.extensions
     assert result.extensions["complexity"] == {
         "max": MAX_COMPLEXITY,
+        "current": cost,
+    }
+
+
+VARIABLE_ARGUMENTS = """query ($input: Int!) {
+  press(limit: $input) {
+    __typename
+    title
+  }
+}"""
+DEFAULT_VARIABLES = """query ($input: Int! = 1000) {
+  press(limit: $input) {
+    __typename
+    title
+  }
+}
+"""
+INLINE_ARGUMENTS = """query  {
+  press(limit: 1000) {
+    __typename
+    title
+  }
+}"""
+
+
+@pytest.mark.parametrize(
+    ("query", "variables", "cost"),
+    [
+        (
+            VARIABLE_ARGUMENTS,
+            {"input": 1000},
+            3000,
+        ),
+        (
+            DEFAULT_VARIABLES,
+            {},
+            3000,
+        ),
+        (
+            INLINE_ARGUMENTS,
+            {},
+            3000,
+        ),
+    ],
+)
+def test_variables(query: str, variables: dict[str, Any], cost: int) -> None:
+    schema = Schema(
+        query=Query,
+        extensions=[
+            QueryComplexityExtension(
+                max_complexity=10_000,
+                report_complexity=True,
+            ),
+        ],
+        types=[Magazine],
+    )
+    result = schema.execute_sync(query, variable_values=variables)
+    assert result.extensions
+    assert result.extensions["complexity"] == {
+        "max": 10_000,
         "current": cost,
     }

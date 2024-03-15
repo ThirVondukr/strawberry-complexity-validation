@@ -115,7 +115,7 @@ ignore = [
     "TCH003",
 ]
 [tool.ruff.lint.per-file-ignores]
-"strawberry_query_complexity/_complexity.py" = ["ARG002"]
+"strawberry_query_complexity/_validation.py" = ["ARG002"]
 "tests/*" = ["S101"]
 
 [tool.ruff.lint.flake8-pytest-style]
