@@ -1,107 +1,12 @@
 import strawberry
+from graphql.utilities import get_introspection_query
 from strawberry import Schema
 from strawberry_query_complexity import Cost, QueryComplexityExtension
 
-# Introspection query sent by graphiql
-QUERY = """query IntrospectionQuery {
-  __schema {
-    queryType { name }
-    mutationType { name }
-    subscriptionType { name }
-    types {
-      ...FullType
-    }
-    directives {
-      name
-      description
-
-      locations
-      args(includeDeprecated: true) {
-        ...InputValue
-      }
-    }
-  }
-}
-
-fragment FullType on __Type {
-  kind
-  name
-  description
-
-  fields(includeDeprecated: true) {
-    name
-    description
-    args(includeDeprecated: true) {
-      ...InputValue
-    }
-    type {
-      ...TypeRef
-    }
-    isDeprecated
-    deprecationReason
-  }
-  inputFields(includeDeprecated: true) {
-    ...InputValue
-  }
-  interfaces {
-    ...TypeRef
-  }
-  enumValues(includeDeprecated: true) {
-    name
-    description
-    isDeprecated
-    deprecationReason
-  }
-  possibleTypes {
-    ...TypeRef
-  }
-}
-
-fragment InputValue on __InputValue {
-  name
-  description
-  type { ...TypeRef }
-  defaultValue
-  isDeprecated
-  deprecationReason
-}
-
-fragment TypeRef on __Type {
-  kind
-  name
-  ofType {
-    kind
-    name
-    ofType {
-      kind
-      name
-      ofType {
-        kind
-        name
-        ofType {
-          kind
-          name
-          ofType {
-            kind
-            name
-            ofType {
-              kind
-              name
-              ofType {
-                kind
-                name
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"""
-
 
 def test_sdl_query() -> None:
+    query = get_introspection_query()
+
     @strawberry.type
     class Query:
         @strawberry.field(directives=[Cost(complexity=1)])  # type: ignore[misc]
@@ -115,6 +20,6 @@ def test_sdl_query() -> None:
         ],
     )
 
-    result = schema.execute_sync(QUERY)
+    result = schema.execute_sync(query)
     assert not result.errors
     assert not result.extensions

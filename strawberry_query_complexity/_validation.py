@@ -344,7 +344,8 @@ class QueryComplexityValidationRule(ValidationRule):
         )
 
         if resolves_to_type_cost and not isinstance(
-            resolves_to_type_cost, ListCost
+            resolves_to_type_cost,
+            ListCost,
         ):
             state.added_complexity += _get_unset_value(
                 resolves_to_type_cost.complexity,
