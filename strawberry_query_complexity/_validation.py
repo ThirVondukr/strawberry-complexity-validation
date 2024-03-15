@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import typing
-from collections.abc import Mapping, MutableMapping
+from collections.abc import MutableMapping
 from typing import TYPE_CHECKING, TypeVar
 
 import strawberry
@@ -12,18 +12,20 @@ from graphql import (
     FragmentDefinitionNode,
     FragmentSpreadNode,
     GraphQLError,
+    GraphQLField,
     GraphQLInterfaceType,
     GraphQLNamedType,
     GraphQLSchema,
-    GraphQLType,
     GraphQLUnionType,
     GraphQLWrappingType,
-    IntValueNode,
     OperationDefinitionNode,
     ValidationContext,
     ValidationRule,
-    VariableNode,
+    Visitor,
     VisitorAction,
+    get_argument_values,
+    get_named_type,
+    get_variable_values,
 )
 from strawberry.schema.schema_converter import GraphQLCoreConverter
 from strawberry.types import ExecutionContext
@@ -73,17 +75,6 @@ class State:
     )
 
 
-GT = TypeVar("GT", bound=GraphQLType)
-
-
-def _unwrap_graphql_node(
-    node: GT | GraphQLWrappingType[GT],
-) -> GT:
-    while isinstance(node, GraphQLWrappingType):
-        node = node.of_type
-    return node
-
-
 def default_cost_compare_key(directive: AnyCostDirective | None) -> int:
     if directive is None:
         return -1
@@ -101,7 +92,7 @@ def _get_cost_directive(
     if not node:
         return None
 
-    node = _unwrap_graphql_node(node)
+    node = get_named_type(node)
     if isinstance(node, GraphQLInterfaceType):
         return max(
             (
@@ -120,70 +111,40 @@ def _get_cost_directive(
     return None
 
 
-def get_field_arguments(  # noqa: C901
+def _add_field_variables_to_state(  # noqa: PLR0913
     operation: OperationDefinitionNode | None,
     execution_context: ExecutionContext,
-    node: FieldNode,
-) -> Mapping[str, object]:
-    result = {}
-    for argument_node in node.arguments:
-        argument_name = argument_node.name.value
-        if isinstance(argument_node.value, IntValueNode):
-            result[argument_name] = argument_node.value.value
-            continue
-
-        if not isinstance(argument_node.value, VariableNode):
-            continue
-
-        variable_name = argument_node.value.name.value
-        if (
-            execution_context.variables
-            and variable_name in execution_context.variables
-        ):
-            result[argument_name] = execution_context.variables[variable_name]
-            continue
-
-        if operation:
-            variable_definition = next(
-                (
-                    var
-                    for var in operation.variable_definitions
-                    if var.variable.name.value == variable_name
-                ),
-                None,
-            )
-            if not variable_definition or not isinstance(
-                variable_definition.default_value,
-                IntValueNode,
-            ):
-                continue
-            result[argument_name] = variable_definition.default_value.value
-            continue
-    return result
-
-
-def _add_field_variables_to_state(
-    operation: OperationDefinitionNode | None,
-    execution_context: ExecutionContext,
+    type_def: GraphQLField,
     node: FieldNode,
     state: State,
     cost: AnyCostDirective | None,
-) -> None:
+) -> VisitorAction:
     if not isinstance(cost, ListCost) or not cost.arguments:
-        return
+        return None
 
-    field_arguments = get_field_arguments(
-        node=node,
-        operation=operation,
-        execution_context=execution_context,
+    variables_values = get_variable_values(
+        schema=execution_context.schema._schema,  # noqa: SLF001
+        var_def_nodes=operation.variable_definitions if operation else [],
+        inputs=execution_context.variables or {},
     )
-    for k, v in field_arguments.items():
-        if k not in cost.arguments:
+    if isinstance(variables_values, list):
+        if execution_context.errors is None:
+            execution_context.errors = []
+        execution_context.errors.extend(variables_values)
+
+        return Visitor.BREAK
+
+    argument_values = get_argument_values(
+        type_def=type_def,
+        node=node,
+        variable_values=variables_values,
+    )
+
+    for arg in node.arguments:
+        if arg.name.value not in cost.arguments:
             continue
-        if isinstance(v, str) and v.isnumeric():
-            state.multipliers.append(int(v))
-        if isinstance(v, int):
-            state.multipliers.append(v)
+        state.multipliers.append(argument_values[arg.name.value])
+    return None
 
 
 class QueryComplexityValidationRule(ValidationRule):
@@ -334,14 +295,16 @@ class QueryComplexityValidationRule(ValidationRule):
         cost = max(directives, key=default_cost_compare_key)
 
         state = State(directive=cost)
-
-        _add_field_variables_to_state(
+        result = _add_field_variables_to_state(
             self.operation_definition,
+            type_def=self.context.get_field_def(),  # type: ignore[arg-type]
             execution_context=self.execution_context,
             node=node,
             state=state,
             cost=cost,
         )
+        if result is not None:
+            return result
 
         if resolves_to_type_cost and not isinstance(
             resolves_to_type_cost,
